@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🎙️ AI Протокол совещания</title>
+  <script src="/aux/static/marked.min.js" defer></script>
+  <style>
+    :root {
+      --primary:       #10a37f;
+      --primary-hover: #0e906f;
+      --danger:        #ef4444;
+      --danger-hover:  #dc2626;
+      --bg-color:      #f7f7f8;
+      --box-bg:        #ffffff;
+      --border:        #e5e7eb;
+      --text-main:     #374151;
+      --text-muted:    #6b7280;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 2rem 1rem;
+      line-height: 1.6;
+    }
+    .header { text-align: center; margin-bottom: 2rem; }
+    .header h1 { margin-bottom: 0.5rem; }
+    .setup-panel {
+      background: var(--box-bg);
+      padding: 1rem 1.5rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      margin-bottom: 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    .setup-panel input {
+      flex-grow: 1;
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    .controls {
+      display: flex;
+      justify-content: center;
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+    button {
+      padding: 12px 24px;
+      font-size: 16px;
+      font-weight: 600;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    button:disabled { opacity: 0.6; cursor: not-allowed; transform: none !important; }
+    #startBtn { background-color: var(--primary); color: white; box-shadow: 0 4px 6px rgba(16,163,127,0.2); }
+    #startBtn:not(:disabled):hover { background-color: var(--primary-hover); transform: translateY(-1px); }
+    #stopBtn { background-color: var(--danger); color: white; box-shadow: 0 4px 6px rgba(239,68,68,0.2); }
+    #stopBtn:not(:disabled):hover { background-color: var(--danger-hover); transform: translateY(-1px); }
+    .panels-grid { display: grid; grid-template-columns: 1fr; gap: 1.5rem; }
+    .panel {
+      background: var(--box-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+      display: flex;
+      flex-direction: column;
+    }
+    .panel h3 { margin-top: 0; margin-bottom: 1rem; display: flex; align-items: center; justify-content: space-between; }
+    .content-box {
+      flex-grow: 1;
+      min-height: 200px;
+      max-height: 400px;
+      overflow-y: auto;
+      padding: 1rem;
+      background: #f9fafb;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      white-space: pre-wrap;
+      font-size: 15px;
+    }
+    #protocolBox { white-space: normal; background: #f0fdf4; border-color: #bbf7d0; }
+    #protocolBox h1, #protocolBox h2, #protocolBox h3 { margin-top: 0.8em; margin-bottom: 0.4em; font-size: 1em; font-weight: 700; }
+    #protocolBox p { margin: 0.4em 0; }
+    #protocolBox ul, #protocolBox ol { margin: 0.4em 0; padding-left: 1.5em; }
+    #protocolBox strong { font-weight: 700; }
+    .status-badge { font-size: 13px; font-weight: normal; padding: 4px 10px; border-radius: 12px; background: #e5e7eb; color: var(--text-muted); }
+    .status-recording { background: #fecaca; color: #991b1b; animation: pulse 2s infinite; }
+    .system-msg { color: var(--text-muted); font-style: italic; font-size: 0.9em; margin: 5px 0; }
+    .live-line { opacity: 0.68; }
+    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
+    #volumeMeter { height: 4px; background: #e5e7eb; border-radius: 2px; margin-top: -10px; margin-bottom: 20px; overflow: hidden; display: none; }
+    #volumeLevel { height: 100%; width: 0; background: var(--primary); transition: width 0.1s ease; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🎙️ AI Протокол совещания</h1>
+  <p style="color: var(--text-muted)">ИРНИТУ — cloud-b.istu.edu</p>
+</div>
+
+<div class="setup-panel">
+  <label for="serverUrl" style="font-weight:500; white-space:nowrap;">Адрес сервера:</label>
+  <input type="text" id="serverUrl" />
+</div>
+
+<div class="controls">
+  <button id="startBtn">
+    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+        d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"/>
+    </svg>
+    Начать запись
+  </button>
+  <button id="stopBtn" disabled>
+    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+        d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+        d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/>
+    </svg>
+    Завершить и создать протокол
+  </button>
+</div>
+
+<div id="volumeMeter"><div id="volumeLevel"></div></div>
+
+<div class="panels-grid">
+  <div class="panel">
+    <h3>Ход совещания <span id="recordingStatus" class="status-badge">Ожидание</span></h3>
+    <div id="transcriptBox" class="content-box">
+      <div class="system-msg">Нажмите «Начать запись», чтобы запустить транскрипцию...</div>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>Официальный протокол <span id="protocolStatus" class="status-badge">Нет данных</span></h3>
+    <div id="protocolBox" class="content-box">
+      <div class="system-msg">Протокол будет сгенерирован автоматически после завершения совещания.</div>
+    </div>
+    <div style="margin-top:0.75rem; display:flex; justify-content:flex-end;">
+      <button id="downloadBtn" disabled style="padding:8px 16px;font-size:14px;font-weight:500;background:#2563eb;color:white;border-radius:6px;display:flex;align-items:center;gap:6px;box-shadow:0 2px 4px rgba(37,99,235,0.2);">
+        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+        </svg>
+        Скачать .docx
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
+  document.getElementById("serverUrl").value = `${wsProto}://${window.location.host}/aux/ws/meeting`;
+})();
+
+let mediaRecorder=null, socket=null, mediaStream=null, audioContext=null;
+let analyzer=null, animationFrame=null, timerInterval=null;
+let recordingStartTime=null, isStopping=false;
+let transcriptCommitted="", transcriptLive="", lastTextAt=0;
+
+const startBtn=document.getElementById("startBtn");
+const stopBtn=document.getElementById("stopBtn");
+const serverInput=document.getElementById("serverUrl");
+const transcriptBox=document.getElementById("transcriptBox");
+const protocolBox=document.getElementById("protocolBox");
+const recordingStatus=document.getElementById("recordingStatus");
+const protocolStatus=document.getElementById("protocolStatus");
+const volumeMeter=document.getElementById("volumeMeter");
+const volumeLevel=document.getElementById("volumeLevel");
+
+function elapsedSeconds() { return recordingStartTime ? (Date.now()-recordingStartTime)/1000 : 0; }
+function formatTime(s) { s=Math.max(0,Math.floor(s)); return `${Math.floor(s/60).toString().padStart(2,"0")}:${(s%60).toString().padStart(2,"0")}`; }
+function escapeHtml(str) { return str.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }
+function normalizeText(str) { return str.replace(/\s+/g," ").replace(/[.!,?;:]/g,"").trim().toLowerCase(); }
+
+function renderTranscript() {
+  if (!transcriptCommitted && !transcriptLive) {
+    transcriptBox.innerHTML=`<div class="system-msg">Нажмите «Начать запись», чтобы запустить транскрипцию...</div>`;
+    return;
+  }
+  const live=transcriptLive ? `<span class="live-line">${escapeHtml(transcriptLive)}</span>` : "";
+  transcriptBox.innerHTML=(transcriptCommitted ? escapeHtml(transcriptCommitted)+" " : "")+live;
+  transcriptBox.scrollTop=transcriptBox.scrollHeight;
+}
+
+function commitLiveTranscript() {
+  if (!transcriptLive) return;
+  const normLive=normalizeText(transcriptLive);
+  const normTail=normalizeText(transcriptCommitted.split(" ").slice(-30).join(" "));
+  if (!normTail.endsWith(normLive))
+    transcriptCommitted=transcriptCommitted ? transcriptCommitted+" "+transcriptLive : transcriptLive;
+  transcriptLive="";
+  renderTranscript();
+}
+
+function appendTranscriptChunk(text, isFinal) {
+  const cleaned=text.trim();
+  if (!cleaned) return;
+  const normNew=normalizeText(cleaned);
+  if (!normNew) return;
+
+  if (isFinal) {
+    transcriptLive="";
+    const normTail=normalizeText(transcriptCommitted.split(" ").slice(-30).join(" "));
+    if (normTail.endsWith(normNew)) { renderTranscript(); return; }
+    transcriptCommitted=transcriptCommitted ? transcriptCommitted+" "+cleaned : cleaned;
+    lastTextAt=Date.now();
+    renderTranscript();
+  } else {
+    if (normNew===normalizeText(transcriptLive)) { lastTextAt=Date.now(); return; }
+    const normLive=normalizeText(transcriptLive);
+    if (normLive && normNew.startsWith(normLive)) { transcriptLive=cleaned; lastTextAt=Date.now(); renderTranscript(); return; }
+    const normTail=normalizeText(transcriptCommitted.split(" ").slice(-30).join(" "));
+    if (normTail && normTail.endsWith(normNew)) return;
+    if (transcriptLive && Date.now()-lastTextAt>2500) commitLiveTranscript();
+    transcriptLive=cleaned; lastTextAt=Date.now(); renderTranscript();
+  }
+}
+
+function setRecordingStatus(text, rec=false) {
+  recordingStatus.textContent=text;
+  rec ? recordingStatus.classList.add("status-recording") : recordingStatus.classList.remove("status-recording");
+}
+function setProtocolWaiting(t)  { protocolStatus.textContent=t; protocolStatus.style.cssText="background:#e5e7eb;color:#6b7280"; }
+function setProtocolProgress(t) { protocolStatus.textContent=t; protocolStatus.style.cssText="background:#fef9c3;color:#854d0e"; }
+function setProtocolReady(t)    { protocolStatus.textContent=t; protocolStatus.style.cssText="background:#dcfce7;color:#166534"; }
+
+let protocolRawText="";
+function renderProtocol(text) {
+  protocolRawText=text;
+  protocolBox.innerHTML=typeof marked!=="undefined" ? marked.parse(text) : `<pre>${escapeHtml(text)}</pre>`;
+  protocolBox.scrollTop=0;
+  document.getElementById("downloadBtn").disabled=false;
+}
+
+function setupAudioVisualizer(stream) {
+  audioContext=new (window.AudioContext||window.webkitAudioContext)();
+  analyzer=audioContext.createAnalyser();
+  audioContext.createMediaStreamSource(stream).connect(analyzer);
+  analyzer.fftSize=256;
+  const dataArray=new Uint8Array(analyzer.frequencyBinCount);
+  volumeMeter.style.display="block";
+  (function tick() {
+    if (!analyzer) return;
+    analyzer.getByteFrequencyData(dataArray);
+    let sum=0; for (let i=0;i<dataArray.length;i++) sum+=dataArray[i];
+    volumeLevel.style.width=Math.min(100,(sum/dataArray.length/128)*100)+"%";
+    animationFrame=requestAnimationFrame(tick);
+  })();
+}
+
+function cleanupMedia() {
+  if (animationFrame) { cancelAnimationFrame(animationFrame); animationFrame=null; }
+  volumeMeter.style.display="none"; volumeLevel.style.width="0";
+  if (audioContext) { audioContext.close().catch(()=>{}); audioContext=null; }
+  analyzer=null;
+  if (mediaStream) { mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; }
+  mediaRecorder=null;
+}
+
+function resetUI(finalText) {
+  startBtn.disabled=false; stopBtn.disabled=true; serverInput.disabled=false;
+  clearInterval(timerInterval); timerInterval=null;
+  setRecordingStatus(finalText,false); cleanupMedia(); isStopping=false;
+}
+
+function getSupportedMimeType() {
+  const c=["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/ogg"];
+  for (const m of c) if (window.MediaRecorder&&MediaRecorder.isTypeSupported(m)) return m;
+  return "";
+}
+
+async function startRecording() {
+  const wsUrl=serverInput.value.trim();
+  if (!wsUrl) { alert("Укажите адрес сервера!"); return; }
+  isStopping=false; transcriptCommitted=""; transcriptLive=""; renderTranscript();
+
+  mediaStream=await navigator.mediaDevices.getUserMedia({
+    audio:{echoCancellation:true,noiseSuppression:false,autoGainControl:true,channelCount:1}
+  });
+
+  socket=new WebSocket(wsUrl);
+  socket.binaryType="arraybuffer";
+
+  socket.onopen=async()=>{
+    protocolBox.innerHTML=`<div class="system-msg">Идёт совещание...</div>`;
+    serverInput.disabled=true; startBtn.disabled=true; stopBtn.disabled=false;
+    recordingStartTime=Date.now();
+    setRecordingStatus("00:00",true); setProtocolWaiting("Ожидание");
+    timerInterval=setInterval(()=>{
+      setRecordingStatus(formatTime(elapsedSeconds()),true);
+      if (transcriptLive && Date.now()-lastTextAt>2500) commitLiveTranscript();
+    },500);
+
+    setupAudioVisualizer(mediaStream);
+    const mimeType=getSupportedMimeType();
+    mediaRecorder=new MediaRecorder(mediaStream, mimeType?{mimeType}:{});
+    mediaRecorder.ondataavailable=async(event)=>{
+      if (!event.data||event.data.size===0) return;
+      if (!socket||socket.readyState!==WebSocket.OPEN) return;
+      try { socket.send(await event.data.arrayBuffer()); } catch(e) { console.error("Audio send error:",e); }
+    };
+    mediaRecorder.onerror=(e)=>console.error("MediaRecorder error:",e);
+    mediaRecorder.start(250);
+  };
+
+  socket.onmessage=(event)=>{
+    const msg=typeof event.data==="string" ? event.data : "";
+    if (msg.startsWith("FINAL:"))    { appendTranscriptChunk(msg.slice(6).trim(),true);  return; }
+    if (msg.startsWith("TEXT:"))     { appendTranscriptChunk(msg.slice(5).trim(),false); return; }
+    if (msg.startsWith("PROTOCOL:")) {
+      commitLiveTranscript(); renderProtocol(msg.slice(9).trim()); setProtocolReady("Готов");
+      if (socket&&socket.readyState===WebSocket.OPEN) socket.close(); return;
+    }
+    if (msg.startsWith("SYSTEM:")) {
+      const s=msg.slice(7).trim();
+      protocolBox.innerHTML=`<div class="system-msg">${escapeHtml(s)}</div>`;
+      setProtocolProgress(s.includes("нейросет")?"Генерация...":s); return;
+    }
+  };
+
+  socket.onerror=(err)=>{ console.error("WS error:",err); alert("Ошибка WebSocket.\nПроверьте адрес сервера и HTTPS."); resetUI("Ошибка"); };
+  socket.onclose=()=>{ if (!isStopping&&!stopBtn.disabled) resetUI("Остановлено"); else resetUI(formatTime(elapsedSeconds())); };
+}
+
+async function stopRecording() {
+  if (isStopping) return;
+  isStopping=true; stopBtn.disabled=true;
+  clearInterval(timerInterval); timerInterval=null;
+  setRecordingStatus(`${formatTime(elapsedSeconds())} — завершение...`,false);
+  setProtocolProgress("Обработка...");
+  try {
+    if (mediaRecorder&&mediaRecorder.state!=="inactive") { mediaRecorder.stop(); await new Promise(r=>setTimeout(r,300)); }
+    if (socket&&socket.readyState===WebSocket.OPEN) socket.send("STOP");
+  } catch(e) { console.error("Stop error:",e); }
+}
+
+async function loadDocxLib() {
+  if (window.docx) return;
+  await new Promise((resolve,reject)=>{
+    const s=document.createElement("script");
+    s.src="/aux/static/docx.min.js"; s.onload=resolve;
+    s.onerror=()=>reject(new Error("Не удалось загрузить /aux/static/docx.min.js"));
+    document.head.appendChild(s);
+  });
+}
+
+async function downloadDocx() {
+  if (!protocolRawText) return;
+  const btn=document.getElementById("downloadBtn");
+  btn.disabled=true; btn.textContent="Загрузка...";
+  try { await loadDocxLib(); } catch(e) { alert(e.message); btn.disabled=false; btn.textContent="Скачать .docx"; return; }
+
+  const {Document,Packer,Paragraph,TextRun,HeadingLevel}=docx;
+  const lines=protocolRawText.split("\n"), children=[];
+  for (const line of lines) {
+    const t=line.trim();
+    if (!t) { children.push(new Paragraph("")); continue; }
+    if (t.startsWith("### ")) children.push(new Paragraph({text:t.slice(4),heading:HeadingLevel.HEADING_3}));
+    else if (t.startsWith("## ")) children.push(new Paragraph({text:t.slice(3),heading:HeadingLevel.HEADING_2}));
+    else if (t.startsWith("# "))  children.push(new Paragraph({text:t.slice(2),heading:HeadingLevel.HEADING_1}));
+    else if (t.startsWith("- ")||t.startsWith("* ")) children.push(new Paragraph({text:t.slice(2),bullet:{level:0}}));
+    else if (/^\d+\./.test(t)) children.push(new Paragraph({text:t.replace(/^\d+\.\s*/,""),numbering:{reference:"default-numbering",level:0}}));
+    else {
+      const runs=[], parts=t.split(/(\*\*[^*]+\*\*)/g);
+      for (const p of parts) {
+        if (p.startsWith("**")&&p.endsWith("**")) runs.push(new TextRun({text:p.slice(2,-2),bold:true}));
+        else if (p) runs.push(new TextRun({text:p}));
+      }
+      children.push(new Paragraph({children:runs}));
+    }
+  }
+  const doc=new Document({
+    numbering:{config:[{reference:"default-numbering",levels:[{level:0,format:"decimal",text:"%1.",alignment:"start"}]}]},
+    sections:[{children}]
+  });
+  const blob=await Packer.toBlob(doc);
+  const a=document.createElement("a");
+  const now=new Date();
+  const ts=`${now.getFullYear()}${String(now.getMonth()+1).padStart(2,"0")}${String(now.getDate()).padStart(2,"0")}${String(now.getHours()).padStart(2,"0")}${String(now.getMinutes()).padStart(2,"0")}`;
+  a.href=URL.createObjectURL(blob); a.download=`protocol_${ts}.docx`; a.click(); URL.revokeObjectURL(a.href);
+  btn.disabled=false; btn.textContent="Скачать .docx";
+}
+
+document.getElementById("downloadBtn").onclick=downloadDocx;
+startBtn.onclick=async()=>{ try { await startRecording(); } catch(err) { alert(err.message+"\n\nСтраница должна открываться по HTTPS."); console.error(err); resetUI("Ошибка"); } };
+stopBtn.onclick=stopRecording;
+</script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+version: "3.9"
+
+services:
+  aux_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aux_app:latest
+    container_name: aux_app
+    restart: unless-stopped
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    volumes:
+      - ./model:/src/model:ro
+      - ./protocols:/src/protocols:rw
+      - ./index.html:/src/static/index.html:ro
+
+    environment:
+      OLLAMA_URL:      "http://host.docker.internal:18787/api/generate"
+      OLLAMA_MODEL:    "qwen2.5:7b"
+      PROTOCOLS_DIR:   "/src/protocols"
+      VOSK_MODEL_PATH: "/src/model"
+      STATIC_DIR:      "/src/static"
+      OMP_NUM_THREADS: "4"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: "8G"
+        reservations:
+          memory: "2G"
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/docs || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

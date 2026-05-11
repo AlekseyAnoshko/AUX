@@ -1,0 +1,27 @@
+# Vosk model (большой файл)
+model/
+vosk-model-ru*/
+
+# Протоколы (генерируются в рантайме)
+protocols/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Env
+.env
+
+# JS минификаты (не храним в репо)
+marked.min.js
+docx.min.js
+
+# Docker
+*.tar
+
+# OS
+.DS_Store
+Thumbs.db
