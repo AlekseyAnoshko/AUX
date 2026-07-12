@@ -1,3 +1,4 @@
+# Python-зависимости AUX Meeting STT
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
 httpx==0.28.1
@@ -6,3 +7,4 @@ starlette==0.46.2
 pydantic==2.11.4
 anyio==4.9.0
 websockets==15.0.1
+aiofiles==24.1.0

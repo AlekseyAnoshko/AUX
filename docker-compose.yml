@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   aux_app:
     build:
@@ -17,13 +15,8 @@ services:
       - ./protocols:/src/protocols:rw
       - ./index.html:/src/static/index.html:ro
 
-    environment:
-      OLLAMA_URL:      "http://host.docker.internal:18787/api/generate"
-      OLLAMA_MODEL:    "qwen2.5:7b"
-      PROTOCOLS_DIR:   "/src/protocols"
-      VOSK_MODEL_PATH: "/src/model"
-      STATIC_DIR:      "/src/static"
-      OMP_NUM_THREADS: "4"
+    env_file:
+      - .env
 
     extra_hosts:
       - "host.docker.internal:host-gateway"

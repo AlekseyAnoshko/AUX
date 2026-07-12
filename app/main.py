@@ -1,8 +1,10 @@
 import asyncio
+import datetime
 import json
 import os
 from collections import deque
 
+import aiofiles
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +17,10 @@ OLLAMA_MODEL     = os.getenv("OLLAMA_MODEL",     "qwen2.5:7b")
 PROTOCOLS_DIR    = os.getenv("PROTOCOLS_DIR",    "src/protocols")
 VOSK_MODEL_PATH  = os.getenv("VOSK_MODEL_PATH",  "src/model")
 STATIC_DIR       = os.getenv("STATIC_DIR",       "src/static")
+# CORS: comma-separated origins, e.g. "https://example.com,https://other.com"
+# Use "*" only for local development — set explicitly in .env on production
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
+ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
 os.makedirs(PROTOCOLS_DIR, exist_ok=True)
 
@@ -26,7 +32,7 @@ print("Vosk загружен!", flush=True)
 app = FastAPI(title="AUX Meeting Server", description="Real-time STT + протокол", root_path="/aux")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -42,7 +48,6 @@ SAMPLE_RATE = 16000
 
 
 async def generate_protocol(transcript: str) -> str:
-    import datetime
     now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
     prompt = (
         f"{now}. Составь официальный протокол совещания в формате Markdown."
@@ -64,11 +69,10 @@ async def generate_protocol(transcript: str) -> str:
 
 
 async def save_protocol(text: str) -> str:
-    import datetime
     ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
     path = os.path.join(PROTOCOLS_DIR, f"protocol_{ts}.txt")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
+    async with aiofiles.open(path, "w", encoding="utf-8") as f:
+        await f.write(text)
     return path
 
 
@@ -192,7 +196,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         transcript_parts.append(text)
                         last_partial = ""
                         last_sent_partial = ""
-                        last_result_at = asyncio.get_event_loop().time()
+                        last_result_at = asyncio.get_running_loop().time()
                         print(f"VOSK RESULT: {text}", flush=True)
                         if websocket.application_state == WebSocketState.CONNECTED:
                             try:
@@ -204,7 +208,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         last_partial = ""
                         last_sent_partial = ""
                 else:
-                    now = asyncio.get_event_loop().time()
+                    now = asyncio.get_running_loop().time()
                     since_result = now - last_result_at
                     since_last_sent = now - last_partial_sent_at
                     if (
