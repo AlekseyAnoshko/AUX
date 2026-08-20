@@ -7,6 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Явные пути внутри контейнера — совпадают с дефолтами в app/main.py
+ENV PROTOCOLS_DIR=/app/src/protocols \
+    VOSK_MODEL_PATH=/app/src/model \
+    STATIC_DIR=/app/src/static
+
 # Python-зависимости
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -18,8 +23,11 @@ COPY app/main.py src/main.py
 COPY marked.min.js src/static/marked.min.js
 COPY docx.min.js   src/static/docx.min.js
 
-# Папка для протоколов (Vosk-модель монтируется через volume)
-RUN mkdir -p src/protocols src/static
+# Vosk-модель
+COPY vosk-model-ru/ src/model/
+
+# Папка для протоколов (соответствует PROTOCOLS_DIR)
+RUN mkdir -p src/protocols
 
 EXPOSE 8000
 
