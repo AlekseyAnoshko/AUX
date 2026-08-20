@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>🎙️ AI Протокол совещания</title>
-  <script src="/aux/static/marked.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@14.1.1/lib/marked.umd.js" defer></script>
   <style>
     :root {
       --primary:       #10a37f;
@@ -354,8 +354,8 @@ async function loadDocxLib() {
   if (window.docx) return;
   await new Promise((resolve,reject)=>{
     const s=document.createElement("script");
-    s.src="/aux/static/docx.min.js"; s.onload=resolve;
-    s.onerror=()=>reject(new Error("Не удалось загрузить /aux/static/docx.min.js"));
+    s.src="https://unpkg.com/docx@9.5.1/dist/index.iife.js"; s.onload=resolve;
+    s.onerror=()=>reject(new Error("Не удалось загрузить https://unpkg.com/docx@9.5.1/dist/index.iife.js"));
     document.head.appendChild(s);
   });
 }

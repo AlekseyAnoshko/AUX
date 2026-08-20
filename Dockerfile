@@ -19,9 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Исходный код приложения
 COPY app/main.py src/main.py
 
-# JS-файлы лежат в корне проекта — копируем оттуда
-COPY marked.min.js src/static/marked.min.js
-COPY docx.min.js   src/static/docx.min.js
+# marked и docx подключаются на клиенте через CDN (jsdelivr/unpkg).
 
 # Vosk-модель
 COPY vosk-model-ru/ src/model/
