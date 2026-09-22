@@ -2,11 +2,14 @@ import asyncio
 import datetime
 import json
 import os
+import uuid
 from collections import deque
+from pathlib import Path
 
 import aiofiles
 import httpx
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketState
@@ -14,9 +17,9 @@ from vosk import Model, KaldiRecognizer, SetLogLevel
 
 OLLAMA_URL       = os.getenv("OLLAMA_URL",       "http://host.docker.internal:18787/api/generate")
 OLLAMA_MODEL     = os.getenv("OLLAMA_MODEL",     "qwen2.5:7b")
-PROTOCOLS_DIR    = os.getenv("PROTOCOLS_DIR",    "src/protocols")
-VOSK_MODEL_PATH  = os.getenv("VOSK_MODEL_PATH",  "src/model")
-STATIC_DIR       = os.getenv("STATIC_DIR",       "src/static")
+PROTOCOLS_DIR    = os.getenv("PROTOCOLS_DIR",    "/app/src/protocols")
+VOSK_MODEL_PATH  = os.getenv("VOSK_MODEL_PATH",  "/app/src/model")
+STATIC_DIR       = os.getenv("STATIC_DIR",       "/app/src/static")
 # CORS: comma-separated origins, e.g. "https://example.com,https://other.com"
 # Use "*" only for local development — set explicitly in .env on production
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
@@ -45,36 +48,72 @@ else:
     print(f"Static dir not found: {STATIC_DIR}", flush=True)
 
 SAMPLE_RATE = 16000
+MAX_TRANSCRIPT_CHARS = 120_000
+OLLAMA_RETRIES = 3
+
+
+async def _ollama_request(prompt: str) -> str:
+    last_error = None
+    for attempt in range(OLLAMA_RETRIES):
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                resp = await client.post(
+                    OLLAMA_URL,
+                    json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
+                )
+                resp.raise_for_status()
+                result = resp.json().get("response", "").strip()
+                if not result:
+                    raise RuntimeError("Ollama вернул пустой ответ")
+                return result
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError, httpx.HTTPStatusError, RuntimeError) as exc:
+            last_error = exc
+            if attempt + 1 < OLLAMA_RETRIES:
+                await asyncio.sleep(2 ** attempt)
+    raise RuntimeError(f"Ollama: {type(last_error).__name__}: {last_error}") from last_error
 
 
 async def generate_protocol(transcript: str) -> str:
     now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
-    prompt = (
-        f"{now}. Составь официальный протокол совещания в формате Markdown."
-        f" Только plain text. Без вводных фраз."
-        f" Транскрипция:\n\n{transcript}"
+    if len(transcript) <= 30_000:
+        return await _ollama_request(
+            f"{now}. Составь официальный протокол совещания в формате Markdown. "
+            f"Только содержательный текст без вводных фраз. Транскрипция:\n\n{transcript}"
+        )
+
+    chunks = [transcript[i:i + 30_000] for i in range(0, len(transcript), 30_000)]
+    summaries = []
+    for index, chunk in enumerate(chunks, 1):
+        summaries.append(await _ollama_request(
+            f"Сделай краткую фактическую выжимку фрагмента {index}/{len(chunks)} "
+            f"транскрипции совещания. Сохрани решения, задачи, ответственных, сроки "
+            f"и важные договорённости. Не добавляй фактов от себя.\n\n{chunk}"
+        ))
+
+    return await _ollama_request(
+        f"{now}. Составь официальный протокол совещания в формате Markdown по выжимкам ниже. "
+        f"Объедини повторы, сохрани решения, задачи, ответственных и сроки. "
+        f"Только содержательный текст без вводных фраз.\n\n" + "\n\n".join(summaries)
     )
-    try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            resp = await client.post(
-                OLLAMA_URL,
-                json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-            )
-            resp.raise_for_status()
-            return resp.json().get("response", "").strip()
-    except Exception as e:
-        err = f"{type(e).__name__}: {e}"
-        print(f"OLLAMA error: {err}", flush=True)
-        return f"Ошибка генерации: {err}"
+
+async def save_protocol(text: str) -> tuple[str, str]:
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    basename = f"protocol_{timestamp}_{uuid.uuid4().hex[:8]}"
+    txt_path = os.path.join(PROTOCOLS_DIR, f"{basename}.txt")
+    async with aiofiles.open(txt_path, "w", encoding="utf-8") as file:
+        await file.write(text)
+    return txt_path, basename
 
 
-async def save_protocol(text: str) -> str:
-    ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    path = os.path.join(PROTOCOLS_DIR, f"protocol_{ts}.txt")
-    async with aiofiles.open(path, "w", encoding="utf-8") as f:
-        await f.write(text)
-    return path
-
+@app.get("/protocols/{filename}")
+async def download_protocol(filename: str):
+    safe_name = Path(filename).name
+    if safe_name != filename or not safe_name.startswith("protocol_"):
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    path = Path(PROTOCOLS_DIR) / safe_name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    return FileResponse(path)
 
 @app.websocket("/ws/meeting")
 async def websocket_endpoint(websocket: WebSocket):
@@ -84,211 +123,163 @@ async def websocket_endpoint(websocket: WebSocket):
 
     rec = KaldiRecognizer(vosk_model, SAMPLE_RATE)
     rec.SetWords(False)
-
-    force_stop = asyncio.Event()
-    stop_signal = asyncio.Event()
+    stop_requested = asyncio.Event()
+    aborted = asyncio.Event()
     transcript_parts: deque[str] = deque(maxlen=500)
+    transcript_chars = 0
     pcm_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=200)
 
     ffmpeg_proc = await asyncio.create_subprocess_exec(
-        "ffmpeg",
-        "-fflags", "nobuffer",
-        "-flags", "low_delay",
-        "-probesize", "32768",
-        "-analyzeduration", "0",
-        "-i", "pipe:0",
-        "-f", "s16le",
-        "-acodec", "pcm_s16le",
-        "-ar", str(SAMPLE_RATE),
-        "-ac", "1",
-        "-loglevel", "quiet",
-        "pipe:1",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
+        "ffmpeg", "-fflags", "nobuffer", "-flags", "low_delay",
+        "-probesize", "32768", "-analyzeduration", "0", "-i", "pipe:0",
+        "-f", "s16le", "-acodec", "pcm_s16le", "-ar", str(SAMPLE_RATE), "-ac", "1",
+        "-loglevel", "quiet", "pipe:1",
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
 
-    async def receiver():
-        try:
-            while not force_stop.is_set():
-                message = await websocket.receive()
-                if message["type"] == "websocket.disconnect":
-                    break
-                if "bytes" in message and message["bytes"]:
-                    data = message["bytes"]
-                    print(f"WS AUDIO {len(data)} bytes", flush=True)
-                    try:
-                        ffmpeg_proc.stdin.write(data)
-                        await ffmpeg_proc.stdin.drain()
-                    except Exception as e:
-                        print(f"WS FFmpeg write error: {e}", flush=True)
-                        break
-                elif "text" in message and message["text"] == "STOP":
-                    print("WS STOP received", flush=True)
-                    stop_signal.set()
-                    break
-        except WebSocketDisconnect:
-            print(f"WS Disconnect: {client}", flush=True)
-        except Exception as e:
-            print(f"WS Error: {e}", flush=True)
-        finally:
-            force_stop.set()
+    def add_transcript(text: str) -> None:
+        nonlocal transcript_chars
+        if not text:
+            return
+        if transcript_chars + len(text) > MAX_TRANSCRIPT_CHARS:
+            raise RuntimeError("Транскрипция превысила лимит 120000 символов")
+        transcript_parts.append(text)
+        transcript_chars += len(text)
+
+    async def close_ffmpeg_stdin():
+        if ffmpeg_proc.stdin is not None:
             try:
                 ffmpeg_proc.stdin.close()
             except Exception:
                 pass
-            await pcm_queue.put(None)
+
+    async def receiver():
+        try:
+            while not stop_requested.is_set() and not aborted.is_set():
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    aborted.set()
+                    break
+                if message.get("bytes"):
+                    try:
+                        ffmpeg_proc.stdin.write(message["bytes"])
+                        await ffmpeg_proc.stdin.drain()
+                    except Exception as exc:
+                        print(f"WS FFmpeg write error: {exc}", flush=True)
+                        aborted.set()
+                        break
+                elif message.get("text") == "STOP":
+                    stop_requested.set()
+                    await close_ffmpeg_stdin()
+                    break
+        except WebSocketDisconnect:
+            aborted.set()
+        except Exception as exc:
+            aborted.set()
+            print(f"WS Error: {exc}", flush=True)
+        finally:
+            if aborted.is_set():
+                await close_ffmpeg_stdin()
 
     async def ffmpeg_reader():
         try:
-            while not force_stop.is_set():
-                try:
-                    chunk = await asyncio.wait_for(ffmpeg_proc.stdout.read(8192), timeout=1.0)
-                except asyncio.TimeoutError:
-                    continue
+            while True:
+                chunk = await ffmpeg_proc.stdout.read(8192)
                 if not chunk:
                     break
-                try:
-                    await asyncio.wait_for(pcm_queue.put(chunk), timeout=0.5)
-                except asyncio.TimeoutError:
-                    print("VOSK Queue overflow, chunk dropped", flush=True)
-        except asyncio.CancelledError:
-            pass
+                await pcm_queue.put(chunk)
         finally:
             await pcm_queue.put(None)
 
     async def transcriber():
-        def process_chunk(data: bytes) -> tuple[bool, str]:
+        def process_chunk(data: bytes):
             if rec.AcceptWaveform(data):
                 return True, json.loads(rec.Result()).get("text", "").strip()
-            else:
-                return False, json.loads(rec.PartialResult()).get("partial", "").strip()
+            return False, json.loads(rec.PartialResult()).get("partial", "").strip()
 
         last_partial = ""
-        last_sent_partial = ""
         last_result_at = 0.0
         last_partial_sent_at = 0.0
-
         try:
-            while not force_stop.is_set():
-                try:
-                    chunk = await asyncio.wait_for(pcm_queue.get(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    continue
+            while True:
+                chunk = await pcm_queue.get()
                 if chunk is None:
-                    final_json = await asyncio.to_thread(lambda: json.loads(rec.FinalResult()))
-                    text = final_json.get("text", "").strip()
+                    text = json.loads(rec.FinalResult()).get("text", "").strip()
                     if text:
-                        transcript_parts.append(text)
-                        last_sent_partial = ""
-                        print(f"VOSK FINAL(flush): {text}", flush=True)
+                        add_transcript(text)
                         if websocket.application_state == WebSocketState.CONNECTED:
-                            try:
-                                await websocket.send_text(f"FINAL:{text}")
-                            except Exception:
-                                pass
+                            await websocket.send_text(f"FINAL:{text}")
                     break
 
                 is_final, text = await asyncio.to_thread(process_chunk, chunk)
-
+                now = asyncio.get_running_loop().time()
                 if is_final:
                     if text:
-                        transcript_parts.append(text)
+                        add_transcript(text)
                         last_partial = ""
-                        last_sent_partial = ""
-                        last_result_at = asyncio.get_running_loop().time()
-                        print(f"VOSK RESULT: {text}", flush=True)
+                        last_result_at = now
                         if websocket.application_state == WebSocketState.CONNECTED:
-                            try:
-                                await websocket.send_text(f"FINAL:{text}")
-                            except (RuntimeError, WebSocketDisconnect):
-                                force_stop.set()
-                                break
-                    else:
-                        last_partial = ""
-                        last_sent_partial = ""
-                else:
-                    now = asyncio.get_running_loop().time()
-                    since_result = now - last_result_at
-                    since_last_sent = now - last_partial_sent_at
-                    if (
-                        text
-                        and text != last_partial
-                        and since_result > 1.0
-                        and since_last_sent > 0.5
-                    ):
-                        last_partial = text
-                        last_partial_sent_at = now
-                        last_sent_partial = text
-                        print(f"VOSK PARTIAL: {text}", flush=True)
-                        if websocket.application_state == WebSocketState.CONNECTED:
-                            try:
-                                await websocket.send_text(f"TEXT:{text}")
-                            except (RuntimeError, WebSocketDisconnect):
-                                force_stop.set()
-                                break
-        except asyncio.CancelledError:
-            pass
-        finally:
-            force_stop.set()
-
-    async def protocol_generator():
-        await asyncio.wait(
-            [asyncio.create_task(stop_signal.wait()), asyncio.create_task(force_stop.wait())],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        await asyncio.sleep(5.0)
-        force_stop.set()
-
-        if not transcript_parts:
-            if websocket.application_state == WebSocketState.CONNECTED:
-                try:
-                    await websocket.send_text("PROTOCOL:Протокол не создан — транскрипция пуста.")
-                except Exception:
-                    pass
-            return
-
-        full_transcript = " ".join(transcript_parts)
-        if websocket.application_state == WebSocketState.CONNECTED:
-            try:
-                await websocket.send_text("SYSTEM:Генерирую протокол нейросетью...")
-            except Exception:
-                pass
-
-        print("PROTOCOL: Generating via Ollama", flush=True)
-        protocol_text = await generate_protocol(full_transcript)
-        path = await save_protocol(protocol_text)
-        print(f"PROTOCOL: Saved {path}", flush=True)
-
-        if websocket.application_state == WebSocketState.CONNECTED:
-            try:
-                await websocket.send_text(f"PROTOCOL:{protocol_text}")
-            except Exception:
-                pass
+                            await websocket.send_text(f"FINAL:{text}")
+                elif text and text != last_partial and now - last_result_at > 1.0 and now - last_partial_sent_at > 0.5:
+                    last_partial = text
+                    last_partial_sent_at = now
+                    if websocket.application_state == WebSocketState.CONNECTED:
+                        await websocket.send_text(f"TEXT:{text}")
+        except (WebSocketDisconnect, RuntimeError):
+            aborted.set()
 
     receiver_task = asyncio.create_task(receiver())
     ffmpeg_reader_task = asyncio.create_task(ffmpeg_reader())
     transcriber_task = asyncio.create_task(transcriber())
-    protocol_task = asyncio.create_task(protocol_generator())
 
     try:
-        await asyncio.gather(
-            receiver_task,
-            ffmpeg_reader_task,
-            transcriber_task,
-            protocol_task,
-            return_exceptions=True,
-        )
+        await receiver_task
+        if aborted.is_set():
+            ffmpeg_reader_task.cancel()
+            transcriber_task.cancel()
+            await asyncio.gather(ffmpeg_reader_task, transcriber_task, return_exceptions=True)
+            return
+
+        await ffmpeg_reader_task
+        await transcriber_task
+
+        if not stop_requested.is_set():
+            return
+        if not transcript_parts:
+            if websocket.application_state == WebSocketState.CONNECTED:
+                await websocket.send_text("PROTOCOL:Протокол не создан — транскрипция пуста.")
+            return
+
+        full_transcript = " ".join(transcript_parts)
+        if websocket.application_state == WebSocketState.CONNECTED:
+            await websocket.send_text("SYSTEM:Генерирую протокол нейросетью...")
+
+        try:
+            protocol_text = await generate_protocol(full_transcript)
+            txt_path, basename = await save_protocol(protocol_text)
+        except Exception as exc:
+            print(f"PROTOCOL error: {type(exc).__name__}: {exc}", flush=True)
+            if websocket.application_state == WebSocketState.CONNECTED:
+                await websocket.send_text(f"SYSTEM:Ошибка генерации протокола: {type(exc).__name__}: {exc}")
+            return
+
+        print(f"PROTOCOL: Saved {txt_path}", flush=True)
+        if websocket.application_state == WebSocketState.CONNECTED:
+            await websocket.send_text(f"PROTOCOL:{protocol_text}")
+            await websocket.send_text(f"PROTOCOL_FILE:{basename}.txt")
     finally:
-        force_stop.set()
+        aborted.set()
+        for task in (receiver_task, ffmpeg_reader_task, transcriber_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(receiver_task, ffmpeg_reader_task, transcriber_task, return_exceptions=True)
+        await close_ffmpeg_stdin()
         try:
-            ffmpeg_proc.stdin.close()
-        except Exception:
-            pass
-        try:
+            await asyncio.wait_for(ffmpeg_proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            ffmpeg_proc.kill()
             await ffmpeg_proc.wait()
-        except Exception:
-            pass
         if websocket.application_state == WebSocketState.CONNECTED:
             try:
                 await websocket.close()
