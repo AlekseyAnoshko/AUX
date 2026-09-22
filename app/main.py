@@ -5,6 +5,7 @@ import os
 import uuid
 from collections import deque
 from pathlib import Path
+from docx import Document
 
 import aiofiles
 import httpx
@@ -100,8 +101,32 @@ async def save_protocol(text: str) -> tuple[str, str]:
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     basename = f"protocol_{timestamp}_{uuid.uuid4().hex[:8]}"
     txt_path = os.path.join(PROTOCOLS_DIR, f"{basename}.txt")
+    docx_path = os.path.join(PROTOCOLS_DIR, f"{basename}.docx")
+
     async with aiofiles.open(txt_path, "w", encoding="utf-8") as file:
         await file.write(text)
+
+    def build_docx() -> None:
+        doc = Document()
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                doc.add_paragraph()
+            elif stripped.startswith("### "):
+                doc.add_heading(stripped[4:], level=3)
+            elif stripped.startswith("## "):
+                doc.add_heading(stripped[3:], level=2)
+            elif stripped.startswith("# "):
+                doc.add_heading(stripped[2:], level=1)
+            elif stripped.startswith(("- ", "* ")):
+                doc.add_paragraph(stripped[2:], style="List Bullet")
+            elif len(stripped) > 2 and stripped[0].isdigit() and ". " in stripped[:5]:
+                doc.add_paragraph(stripped.split(". ", 1)[1], style="List Number")
+            else:
+                doc.add_paragraph(stripped)
+        doc.save(docx_path)
+
+    await asyncio.to_thread(build_docx)
     return txt_path, basename
 
 
@@ -267,7 +292,7 @@ async def websocket_endpoint(websocket: WebSocket):
         print(f"PROTOCOL: Saved {txt_path}", flush=True)
         if websocket.application_state == WebSocketState.CONNECTED:
             await websocket.send_text(f"PROTOCOL:{protocol_text}")
-            await websocket.send_text(f"PROTOCOL_FILE:{basename}.txt")
+            await websocket.send_text(f"PROTOCOL_FILE:{basename}.docx")
     finally:
         aborted.set()
         for task in (receiver_task, ffmpeg_reader_task, transcriber_task):
