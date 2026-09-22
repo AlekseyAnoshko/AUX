@@ -11,9 +11,9 @@ services:
       - "127.0.0.1:8000:8000"
 
     volumes:
-      - ./model:/src/model:ro
-      - ./protocols:/src/protocols:rw
-      - ./index.html:/src/static/index.html:ro
+      - ./model:/app/src/model:ro
+      - ./protocols:/app/src/protocols:rw
+      - ./index.html:/app/src/static/index.html:ro
 
     env_file:
       - .env
