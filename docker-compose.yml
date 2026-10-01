@@ -32,7 +32,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "24"
+          cpus: "12"
           memory: "16G"
         reservations:
           memory: "2G"
