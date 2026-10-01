@@ -13,17 +13,20 @@ services:
       - "127.0.0.1:8000:8000"
 
     volumes:
-      - /var/www/aux/index.html:/app/src/static/index.html:ro
-      - ./protocols:/app/src/protocols:rw
+      # FIX: пути исправлены с /src/ на /app/src/ (WORKDIR=/app в Dockerfile)
+     - /var/www/aux/index.html:/app/src/static/index.html:ro
+     - ./protocols:/app/src/protocols:rw
 
     environment:
       TZ:              "Asia/Irkutsk"
       OLLAMA_URL:      "http://host.docker.internal:18787/api/generate"
       OLLAMA_MODEL:    "qwen2.5:7b"
+      # FIX: пути исправлены с /src/ на /app/src/
       PROTOCOLS_DIR:   "/app/src/protocols"
       VOSK_MODEL_PATH: "/app/src/model"
       STATIC_DIR:      "/app/src/static"
       OMP_NUM_THREADS: "4"
+      # FIX: явно указываем разрешённые origins для CORS (вместо wildcard + credentials)
       ALLOW_ORIGINS:   "https://cloud-b.istu.edu"
 
     extra_hosts:

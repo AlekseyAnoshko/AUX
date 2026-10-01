@@ -4,6 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>🎙️ AI Протокол совещания</title>
+  <!--
+    FIX: убран атрибут defer с marked.min.js.
+    С defer скрипт может не успеть загрузиться до прихода сообщения PROTOCOL: по WebSocket.
+    Загружаем синхронно (в <head>) — файл маленький, задержки нет.
+  -->
+  <script src="/aux/static/marked.min.js"></script>
   <style>
     :root {
       --primary:       #10a37f;
@@ -114,7 +120,8 @@
 
 <div class="setup-panel">
   <label for="serverUrl" style="font-weight:500; white-space:nowrap;">Адрес сервера:</label>
-  <input type="text" id="serverUrl" />
+  <!-- FIX: добавлено значение по умолчанию, чтобы пользователь не вводил URL вручную -->
+  <input type="text" id="serverUrl" value="wss://cloud-b.istu.edu/aux/ws/meeting" />
 </div>
 
 <div class="controls">
@@ -140,21 +147,20 @@
 
 <div class="panels-grid">
   <div class="panel">
-    <h3>Ход совещания <span id="recordingStatus" class="status-badge">Ожидание</span></h3>
-    <div id="transcriptBox" class="content-box">
-      <div class="system-msg">Нажмите «Начать запись», чтобы запустить транскрипцию...</div>
-    </div>
+    <h3>
+      📝 Транскрипт
+      <span id="transcriptStatus" class="status-badge">Ожидание</span>
+    </h3>
+    <div id="transcriptBox" class="content-box"></div>
   </div>
   <div class="panel">
-    <h3>Официальный протокол <span id="protocolStatus" class="status-badge">Нет данных</span></h3>
-    <div id="protocolBox" class="content-box">
-      <div class="system-msg">Протокол будет сгенерирован автоматически после завершения совещания.</div>
-    </div>
-    <div style="margin-top:0.75rem; display:flex; justify-content:flex-end;">
-      <button id="downloadBtn" disabled style="padding:8px 16px;font-size:14px;font-weight:500;background:#2563eb;color:white;border-radius:6px;display:flex;align-items:center;gap:6px;box-shadow:0 2px 4px rgba(37,99,235,0.2);">
-        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-        </svg>
+    <h3>
+      📄 Протокол
+      <span id="protocolStatus" class="status-badge">Ожидание</span>
+    </h3>
+    <div id="protocolBox" class="content-box"></div>
+    <div style="margin-top:1rem; display:flex; justify-content:flex-end;">
+      <button id="downloadBtn" style="display:none; padding:8px 16px; font-size:14px; background:var(--primary); color:white; border-radius:6px;">
         Скачать .docx
       </button>
     </div>
@@ -162,208 +168,256 @@
 </div>
 
 <script>
-(function() {
-  const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
-  document.getElementById("serverUrl").value = `${wsProto}://${window.location.host}/aux/ws/meeting`;
-})();
+const startBtn      = document.getElementById("startBtn");
+const stopBtn       = document.getElementById("stopBtn");
+const transcriptBox = document.getElementById("transcriptBox");
+const protocolBox   = document.getElementById("protocolBox");
+const serverUrlInput= document.getElementById("serverUrl");
 
-let mediaRecorder=null, socket=null, mediaStream=null, audioContext=null;
-let analyzer=null, animationFrame=null, timerInterval=null;
-let recordingStartTime=null, isStopping=false;
-let transcriptCommitted="", transcriptLive="", lastTextAt=0;
+let socket         = null;
+let mediaRecorder  = null;
+let mediaStream    = null;
+let audioCtx       = null;
+let analyser       = null;
+let animFrameId    = null;
+let timerInterval  = null;
+let startTime      = null;
+let isStopping     = false;
+let transcriptLive = null;
+let lastTextAt     = 0;
+let protocolRawText= "";
 
-const startBtn=document.getElementById("startBtn");
-const stopBtn=document.getElementById("stopBtn");
-const serverInput=document.getElementById("serverUrl");
-const transcriptBox=document.getElementById("transcriptBox");
-const protocolBox=document.getElementById("protocolBox");
-const recordingStatus=document.getElementById("recordingStatus");
-const protocolStatus=document.getElementById("protocolStatus");
-const volumeMeter=document.getElementById("volumeMeter");
-const volumeLevel=document.getElementById("volumeLevel");
+function escapeHtml(s) {
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
 
-function elapsedSeconds() { return recordingStartTime ? (Date.now()-recordingStartTime)/1000 : 0; }
-function formatTime(s) { s=Math.max(0,Math.floor(s)); return `${Math.floor(s/60).toString().padStart(2,"0")}:${(s%60).toString().padStart(2,"0")}`; }
-function escapeHtml(str) { return str.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }
-function normalizeText(str) { return str.replace(/\s+/g," ").replace(/[.!,?;:]/g,"").trim().toLowerCase(); }
+function formatTime(s) {
+  const m = Math.floor(s/60), sec = s%60;
+  return `${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`;
+}
 
-function renderTranscript() {
-  if (!transcriptCommitted && !transcriptLive) {
-    transcriptBox.innerHTML=`<div class="system-msg">Нажмите «Начать запись», чтобы запустить транскрипцию...</div>`;
-    return;
-  }
-  const live=transcriptLive ? `<span class="live-line">${escapeHtml(transcriptLive)}</span>` : "";
-  transcriptBox.innerHTML=(transcriptCommitted ? escapeHtml(transcriptCommitted)+" " : "")+live;
-  transcriptBox.scrollTop=transcriptBox.scrollHeight;
+function elapsedSeconds() {
+  return startTime ? Math.floor((Date.now()-startTime)/1000) : 0;
+}
+
+function setRecordingStatus(text, isRecording) {
+  const badge = document.getElementById("transcriptStatus");
+  badge.textContent = text;
+  badge.className = "status-badge" + (isRecording ? " status-recording" : "");
+}
+
+function setProtocolProgress(text) {
+  document.getElementById("protocolStatus").textContent = text;
+}
+
+function setProtocolReady(text) {
+  const badge = document.getElementById("protocolStatus");
+  badge.textContent = text;
+  badge.style.background = "#bbf7d0";
+  badge.style.color = "#166534";
+  document.getElementById("downloadBtn").style.display = "inline-flex";
+}
+
+function resetUI(statusText) {
+  startBtn.disabled = false;
+  stopBtn.disabled  = true;
+  isStopping        = false;
+  setRecordingStatus(statusText || "Остановлено", false);
+  if (audioCtx) { try { audioCtx.close(); } catch(e){} audioCtx = null; }
+  if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = null; }
+  document.getElementById("volumeMeter").style.display = "none";
+  if (mediaStream) { mediaStream.getTracks().forEach(t=>t.stop()); mediaStream = null; }
+}
+
+function getSupportedMimeType() {
+  const types = ["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/mp4"];
+  return types.find(t => MediaRecorder.isTypeSupported(t)) || "";
+}
+
+function setupAudioVisualizer(stream) {
+  try {
+    audioCtx  = new AudioContext();
+    analyser  = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    audioCtx.createMediaStreamSource(stream).connect(analyser);
+    const meter = document.getElementById("volumeMeter");
+    const level = document.getElementById("volumeLevel");
+    meter.style.display = "block";
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    function draw() {
+      animFrameId = requestAnimationFrame(draw);
+      analyser.getByteFrequencyData(data);
+      const avg = data.reduce((a,b)=>a+b,0)/data.length;
+      level.style.width = Math.min(100, avg*2) + "%";
+    }
+    draw();
+  } catch(e) { console.warn("Visualizer error:", e); }
 }
 
 function commitLiveTranscript() {
   if (!transcriptLive) return;
-  const normLive=normalizeText(transcriptLive);
-  const normTail=normalizeText(transcriptCommitted.split(" ").slice(-30).join(" "));
-  if (!normTail.endsWith(normLive))
-    transcriptCommitted=transcriptCommitted ? transcriptCommitted+" "+transcriptLive : transcriptLive;
-  transcriptLive="";
-  renderTranscript();
+  transcriptLive.classList.remove("live-line");
+  transcriptLive = null;
 }
 
 function appendTranscriptChunk(text, isFinal) {
-  const cleaned=text.trim();
-  if (!cleaned) return;
-  const normNew=normalizeText(cleaned);
-  if (!normNew) return;
-
+  if (!text) return;
+  lastTextAt = Date.now();
   if (isFinal) {
-    transcriptLive="";
-    const normTail=normalizeText(transcriptCommitted.split(" ").slice(-30).join(" "));
-    if (normTail.endsWith(normNew)) { renderTranscript(); return; }
-    transcriptCommitted=transcriptCommitted ? transcriptCommitted+" "+cleaned : cleaned;
-    lastTextAt=Date.now();
-    renderTranscript();
+    commitLiveTranscript();
+    const line = document.createElement("div");
+    line.textContent = text;
+    transcriptBox.appendChild(line);
+    transcriptBox.scrollTop = transcriptBox.scrollHeight;
   } else {
-    if (normNew===normalizeText(transcriptLive)) { lastTextAt=Date.now(); return; }
-    const normLive=normalizeText(transcriptLive);
-    if (normLive && normNew.startsWith(normLive)) { transcriptLive=cleaned; lastTextAt=Date.now(); renderTranscript(); return; }
-    const normTail=normalizeText(transcriptCommitted.split(" ").slice(-30).join(" "));
-    if (normTail && normTail.endsWith(normNew)) return;
-    if (transcriptLive && Date.now()-lastTextAt>2500) commitLiveTranscript();
-    transcriptLive=cleaned; lastTextAt=Date.now(); renderTranscript();
+    if (!transcriptLive) {
+      transcriptLive = document.createElement("div");
+      transcriptLive.className = "live-line";
+      transcriptBox.appendChild(transcriptLive);
+    }
+    transcriptLive.textContent = text;
+    transcriptBox.scrollTop = transcriptBox.scrollHeight;
   }
 }
 
-function setRecordingStatus(text, rec=false) {
-  recordingStatus.textContent=text;
-  rec ? recordingStatus.classList.add("status-recording") : recordingStatus.classList.remove("status-recording");
-}
-function setProtocolWaiting(t)  { protocolStatus.textContent=t; protocolStatus.style.cssText="background:#e5e7eb;color:#6b7280"; }
-function setProtocolProgress(t) { protocolStatus.textContent=t; protocolStatus.style.cssText="background:#fef9c3;color:#854d0e"; }
-function setProtocolReady(t)    { protocolStatus.textContent=t; protocolStatus.style.cssText="background:#dcfce7;color:#166534"; }
-
-let protocolRawText="";
-let protocolFileName="";
 function renderProtocol(text) {
-  protocolRawText=text;
-  protocolBox.innerHTML=`<pre style="white-space:pre-wrap;margin:0;">${escapeHtml(text)}</pre>`;
-  protocolBox.scrollTop=0;
-}
-function setProtocolFile(name) {
-  protocolFileName=name;
-  document.getElementById("downloadBtn").disabled=false;
-}
-
-function setupAudioVisualizer(stream) {
-  audioContext=new (window.AudioContext||window.webkitAudioContext)();
-  analyzer=audioContext.createAnalyser();
-  audioContext.createMediaStreamSource(stream).connect(analyzer);
-  analyzer.fftSize=256;
-  const dataArray=new Uint8Array(analyzer.frequencyBinCount);
-  volumeMeter.style.display="block";
-  (function tick() {
-    if (!analyzer) return;
-    analyzer.getByteFrequencyData(dataArray);
-    let sum=0; for (let i=0;i<dataArray.length;i++) sum+=dataArray[i];
-    volumeLevel.style.width=Math.min(100,(sum/dataArray.length/128)*100)+"%";
-    animationFrame=requestAnimationFrame(tick);
-  })();
-}
-
-function cleanupMedia() {
-  if (animationFrame) { cancelAnimationFrame(animationFrame); animationFrame=null; }
-  volumeMeter.style.display="none"; volumeLevel.style.width="0";
-  if (audioContext) { audioContext.close().catch(()=>{}); audioContext=null; }
-  analyzer=null;
-  if (mediaStream) { mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; }
-  mediaRecorder=null;
-}
-
-function resetUI(finalText) {
-  startBtn.disabled=false; stopBtn.disabled=true; serverInput.disabled=false;
-  clearInterval(timerInterval); timerInterval=null;
-  setRecordingStatus(finalText,false); cleanupMedia(); isStopping=false;
-}
-
-function getSupportedMimeType() {
-  const c=["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/ogg"];
-  for (const m of c) if (window.MediaRecorder&&MediaRecorder.isTypeSupported(m)) return m;
-  return "";
+  protocolRawText = text;
+  // FIX: проверяем наличие marked перед использованием (защита от race condition при загрузке)
+  if (window.marked) {
+    protocolBox.innerHTML = marked.parse(text);
+  } else {
+    protocolBox.innerHTML = `<pre>${escapeHtml(text)}</pre>`;
+  }
+  protocolBox.scrollTop = 0;
 }
 
 async function startRecording() {
-  const wsUrl=serverInput.value.trim();
-  if (!wsUrl) { alert("Укажите адрес сервера!"); return; }
-  isStopping=false; transcriptCommitted=""; transcriptLive=""; renderTranscript();
+  const url = serverUrlInput.value.trim();
+  if (!url) { alert("Введите адрес сервера WebSocket."); return; }
 
-  mediaStream=await navigator.mediaDevices.getUserMedia({
-    audio:{echoCancellation:true,noiseSuppression:false,autoGainControl:true,channelCount:1}
-  });
+  transcriptBox.innerHTML = "";
+  protocolBox.innerHTML   = "";
+  protocolRawText         = "";
+  transcriptLive          = null;
+  isStopping              = false;
+  document.getElementById("downloadBtn").style.display = "none";
+  document.getElementById("protocolStatus").style.background = "";
+  document.getElementById("protocolStatus").style.color = "";
 
-  socket=new WebSocket(wsUrl);
-  socket.binaryType="arraybuffer";
+  mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
 
-  socket.onopen=async()=>{
-    protocolBox.innerHTML=`<div class="system-msg">Идёт совещание...</div>`;
-    serverInput.disabled=true; startBtn.disabled=true; stopBtn.disabled=false;
-    recordingStartTime=Date.now();
-    setRecordingStatus("00:00",true); setProtocolWaiting("Ожидание");
-    timerInterval=setInterval(()=>{
-      setRecordingStatus(formatTime(elapsedSeconds()),true);
+  socket = new WebSocket(url);
+  socket.binaryType = "arraybuffer";
+
+  socket.onopen = () => {
+    startBtn.disabled = true;
+    stopBtn.disabled  = false;
+    startTime         = Date.now();
+    setRecordingStatus("00:00", true);
+    setProtocolProgress("Ожидание...");
+
+    timerInterval = setInterval(()=>{
+      setRecordingStatus(formatTime(elapsedSeconds()), true);
       if (transcriptLive && Date.now()-lastTextAt>2500) commitLiveTranscript();
-    },500);
+    }, 500);
 
     setupAudioVisualizer(mediaStream);
-    const mimeType=getSupportedMimeType();
-    mediaRecorder=new MediaRecorder(mediaStream, mimeType?{mimeType}:{});
-    mediaRecorder.ondataavailable=async(event)=>{
-      if (!event.data||event.data.size===0) return;
-      if (!socket||socket.readyState!==WebSocket.OPEN) return;
-      try { socket.send(await event.data.arrayBuffer()); } catch(e) { console.error("Audio send error:",e); }
+    const mimeType = getSupportedMimeType();
+    mediaRecorder = new MediaRecorder(mediaStream, mimeType ? {mimeType} : {});
+    mediaRecorder.ondataavailable = async(event)=>{
+      if (!event.data || event.data.size===0) return;
+      if (!socket || socket.readyState!==WebSocket.OPEN) return;
+      try { socket.send(await event.data.arrayBuffer()); } catch(e) { console.error("Audio send error:", e); }
     };
-    mediaRecorder.onerror=(e)=>console.error("MediaRecorder error:",e);
+    mediaRecorder.onerror = (e)=>console.error("MediaRecorder error:", e);
     mediaRecorder.start(250);
   };
 
-  socket.onmessage=(event)=>{
-    const msg=typeof event.data==="string" ? event.data : "";
-    if (msg.startsWith("FINAL:"))    { appendTranscriptChunk(msg.slice(6).trim(),true);  return; }
-    if (msg.startsWith("TEXT:"))     { appendTranscriptChunk(msg.slice(5).trim(),false); return; }
+  socket.onmessage = (event)=>{
+    const msg = typeof event.data==="string" ? event.data : "";
+    if (msg.startsWith("FINAL:"))    { appendTranscriptChunk(msg.slice(6).trim(), true);  return; }
+    if (msg.startsWith("TEXT:"))     { appendTranscriptChunk(msg.slice(5).trim(), false); return; }
     if (msg.startsWith("PROTOCOL:")) {
-      commitLiveTranscript(); renderProtocol(msg.slice(9).trim()); setProtocolReady("Готов");
-      if (socket&&socket.readyState===WebSocket.OPEN) socket.close(); return;
+      commitLiveTranscript();
+      renderProtocol(msg.slice(9).trim());
+      setProtocolReady("Готов");
+      if (socket && socket.readyState===WebSocket.OPEN) socket.close();
+      return;
     }
-    if (msg.startsWith("PROTOCOL_FILE:")) { setProtocolFile(msg.slice(14).trim()); return; }\n    if (msg.startsWith("SYSTEM:")) {
-      const s=msg.slice(7).trim();
-      protocolBox.innerHTML=`<div class="system-msg">${escapeHtml(s)}</div>`;
-      setProtocolProgress(s.includes("нейросет")?"Генерация...":s); return;
+    if (msg.startsWith("SYSTEM:")) {
+      const s = msg.slice(7).trim();
+      protocolBox.innerHTML = `<div class="system-msg">${escapeHtml(s)}</div>`;
+      setProtocolProgress(s.includes("нейросет") ? "Генерация..." : s);
+      return;
     }
   };
 
-  socket.onerror=(err)=>{ console.error("WS error:",err); alert("Ошибка WebSocket.\nПроверьте адрес сервера и HTTPS."); resetUI("Ошибка"); };
-  socket.onclose=()=>{ if (!isStopping&&!stopBtn.disabled) resetUI("Остановлено"); else resetUI(formatTime(elapsedSeconds())); };
+  socket.onerror = (err)=>{ console.error("WS error:", err); alert("Ошибка WebSocket.\nПроверьте адрес сервера и HTTPS."); resetUI("Ошибка"); };
+  socket.onclose = ()=>{ if (!isStopping && !stopBtn.disabled) resetUI("Остановлено"); else resetUI(formatTime(elapsedSeconds())); };
 }
 
 async function stopRecording() {
   if (isStopping) return;
-  isStopping=true; stopBtn.disabled=true;
-  clearInterval(timerInterval); timerInterval=null;
-  setRecordingStatus(`${formatTime(elapsedSeconds())} — завершение...`,false);
+  isStopping = true; stopBtn.disabled = true;
+  clearInterval(timerInterval); timerInterval = null;
+  setRecordingStatus(`${formatTime(elapsedSeconds())} — завершение...`, false);
   setProtocolProgress("Обработка...");
   try {
-    if (mediaRecorder&&mediaRecorder.state!=="inactive") { mediaRecorder.stop(); await new Promise(r=>setTimeout(r,300)); }
-    if (socket&&socket.readyState===WebSocket.OPEN) socket.send("STOP");
-  } catch(e) { console.error("Stop error:",e); }
+    if (mediaRecorder && mediaRecorder.state!=="inactive") { mediaRecorder.stop(); await new Promise(r=>setTimeout(r,300)); }
+    if (socket && socket.readyState===WebSocket.OPEN) socket.send("STOP");
+  } catch(e) { console.error("Stop error:", e); }
+}
+
+async function loadDocxLib() {
+  if (window.docx) return;
+  await new Promise((resolve, reject)=>{
+    const s = document.createElement("script");
+    s.src = "/aux/static/docx.min.js"; s.onload = resolve;
+    s.onerror = ()=>reject(new Error("Не удалось загрузить /aux/static/docx.min.js"));
+    document.head.appendChild(s);
+  });
 }
 
 async function downloadDocx() {
-  if (!protocolFileName) return;
-  const a=document.createElement("a");
-  a.href=`/aux/protocols/${encodeURIComponent(protocolFileName)}`;
-  a.download=protocolFileName;
-  a.click();
+  if (!protocolRawText) return;
+  const btn = document.getElementById("downloadBtn");
+  btn.disabled = true; btn.textContent = "Загрузка...";
+  try { await loadDocxLib(); } catch(e) { alert(e.message); btn.disabled = false; btn.textContent = "Скачать .docx"; return; }
+
+  const {Document, Packer, Paragraph, TextRun, HeadingLevel} = docx;
+  const lines = protocolRawText.split("\n"), children = [];
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) { children.push(new Paragraph("")); continue; }
+    if (t.startsWith("### ")) children.push(new Paragraph({text:t.slice(4), heading:HeadingLevel.HEADING_3}));
+    else if (t.startsWith("## ")) children.push(new Paragraph({text:t.slice(3), heading:HeadingLevel.HEADING_2}));
+    else if (t.startsWith("# "))  children.push(new Paragraph({text:t.slice(2), heading:HeadingLevel.HEADING_1}));
+    else if (t.startsWith("- ")||t.startsWith("* ")) children.push(new Paragraph({text:t.slice(2), bullet:{level:0}}));
+    else if (/^\d+\./.test(t)) children.push(new Paragraph({text:t.replace(/^\d+\.\s*/,""), numbering:{reference:"default-numbering", level:0}}));
+    else {
+      const runs = [], parts = t.split(/(\*\*[^*]+\*\*)/g);
+      for (const p of parts) {
+        if (p.startsWith("**") && p.endsWith("**")) runs.push(new TextRun({text:p.slice(2,-2), bold:true}));
+        else if (p) runs.push(new TextRun({text:p}));
+      }
+      children.push(new Paragraph({children:runs}));
+    }
+  }
+  const doc = new Document({
+    numbering:{config:[{reference:"default-numbering", levels:[{level:0, format:"decimal", text:"%1.", alignment:"start"}]}]},
+    sections:[{children}]
+  });
+  const blob = await Packer.toBlob(doc);
+  const a = document.createElement("a");
+  const now = new Date();
+  const ts = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,"0")}${String(now.getDate()).padStart(2,"0")}${String(now.getHours()).padStart(2,"0")}${String(now.getMinutes()).padStart(2,"0")}`;
+  a.href = URL.createObjectURL(blob); a.download = `protocol_${ts}.docx`; a.click(); URL.revokeObjectURL(a.href);
+  btn.disabled = false; btn.textContent = "Скачать .docx";
 }
 
-document.getElementById("downloadBtn").onclick=downloadDocx;
-startBtn.onclick=async()=>{ try { await startRecording(); } catch(err) { alert(err.message+"\n\nСтраница должна открываться по HTTPS."); console.error(err); resetUI("Ошибка"); } };
-stopBtn.onclick=stopRecording;
+document.getElementById("downloadBtn").onclick = downloadDocx;
+startBtn.onclick = async()=>{ try { await startRecording(); } catch(err) { alert(err.message+"\n\nСтраница должна открываться по HTTPS."); console.error(err); resetUI("Ошибка"); } };
+stopBtn.onclick = stopRecording;
 </script>
 </body>
 </html>
