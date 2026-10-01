@@ -1,27 +1,30 @@
-# Vosk model (большой файл)
+# Модели Vosk (большие бинарные файлы)
+vosk-model-ru/
 model/
-vosk-model-ru*/
+src/model/
 
-# Протоколы (генерируются в рантайме)
-protocols/
-
-# Python
+# Кэш
+cache/
 __pycache__/
 *.pyc
-*.pyo
+
+# Сгенерированные протоколы совещаний
+protocols/
+src/protocols/
+
+# Python окружение
 .venv/
 venv/
 
-# Env
+# Секреты
 .env
+*.env
 
-# JS минификаты (не храним в репо)
-marked.min.js
-docx.min.js
+# Логи
+*.log
 
-# Docker
-*.tar
-
-# OS
-.DS_Store
-Thumbs.db
+# Сертификаты и ключи
+nginx/certs/
+*.key
+*.crt
+snapshot.md
